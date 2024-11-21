@@ -94,7 +94,7 @@ async def generate_hiking_path(request: PathRequest):
         trail_network = [
             {
                 "type": "LineString",
-                "coordinates": [[x, y] for x, y in row.geometry.coords],
+                "coordinates": [[float(x), float(y)] for x, y in row.geometry.coords],
             }
             for _, row in trails_gdf.iterrows()
         ]
@@ -125,11 +125,7 @@ async def generate_hiking_path(request: PathRequest):
                             for x, y in [G.get_node_data(node)]
                         ],
                     ),
-                    points=[
-                        all_points[i]
-                        for i in segment
-                        if i < len(matched_pos) or i in optimized_path.camp_indices
-                    ],
+                    points=[all_points[point_idx] for point_idx in segment],
                     distances=[
                         SegmentDistance(
                             from_point=all_points[segment[i]],
@@ -137,14 +133,6 @@ async def generate_hiking_path(request: PathRequest):
                             distance=float(dist_matrix[segment[i]][segment[i + 1]]),
                         )
                         for i in range(len(segment) - 1)
-                        if (
-                            segment[i] < len(matched_pos)
-                            or segment[i] in optimized_path.camp_indices
-                        )
-                        and (
-                            segment[i + 1] < len(matched_pos)
-                            or segment[i + 1] in optimized_path.camp_indices
-                        )
                     ],
                     total_distance=float(
                         sum(
@@ -153,17 +141,14 @@ async def generate_hiking_path(request: PathRequest):
                         )
                     ),
                     camping_spot=(
-                        next(
-                            (
-                                all_points[i]
-                                for i in segment
-                                if i in optimized_path.camp_indices
-                            ),
-                            None,
-                        )
+                        all_points[
+                            optimized_path.points[optimized_path.camp_indices[day_idx]]
+                        ]
+                        if day_idx < len(optimized_path.camp_indices)
+                        else None
                     ),
                 )
-                for segment in optimized_path.get_day_segments()
+                for day_idx, segment in enumerate(optimized_path.get_day_segments())
             ],
             total_distance=float(
                 sum(
@@ -175,10 +160,7 @@ async def generate_hiking_path(request: PathRequest):
                 all_points[optimized_path.points[i]]
                 for i in optimized_path.camp_indices
             ],
-            trail_network=[
-                GeoJSONLineString(type="LineString", coordinates=coords)
-                for coords in trail_network
-            ],
+            trail_network=[GeoJSONLineString(**t) for t in trail_network],
             points_of_interest=[
                 all_points[i] for i in optimized_path.points if i < len(matched_pos)
             ],

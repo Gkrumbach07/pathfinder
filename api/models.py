@@ -41,7 +41,6 @@ class DailySegment(BaseModel):
     points: List[PathPoint]  # All points visited this day in order
     distances: List[SegmentDistance]  # Distances between consecutive points
     total_distance: float
-    camping_spot: Optional[PathPoint]  # The camping spot for this day, if any
 
 
 class PathResponse(BaseModel):

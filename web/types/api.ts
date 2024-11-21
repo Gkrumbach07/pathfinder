@@ -32,7 +32,6 @@ export interface DailySegment {
 	points: PathPoint[];
 	distances: SegmentDistance[];
 	total_distance: number;
-	camping_spot?: PathPoint;
 }
 
 export interface PathResponse {
