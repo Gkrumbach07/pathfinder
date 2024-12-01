@@ -14,7 +14,7 @@ import argparse
 # Constants
 MAX_MATCH_DISTANCE = 0.25 * 1609.34  # 0.25 miles converted to meters
 MAX_DISTANCE_PER_DAY = 12 * 1609.34  # 20 miles per day in meters
-INITIAL_TEMPERATURE = 1.0
+INITIAL_TEMPERATURE = 5.0
 COOLING_RATE = 0.95
 MIN_TEMPERATURE = 0.01
 TOTAL_NIGHTS = 3  # New constant for number of nights
@@ -518,7 +518,7 @@ def calculate_path_score(
     # Scoring weights
     point_weight = 2.0
     distance_penalty_weight = 1.0
-    overlap_weight = 8.0
+    overlap_weight = 20.0
     balance_weight = 2.0
 
     score = (
@@ -543,6 +543,17 @@ def optimize_loop(
     max_day_distance=MAX_DISTANCE_PER_DAY,
 ):
     """Optimize loop and track best paths"""
+    # Validation and debug info
+    print("\nOptimize Loop Starting State:")
+    print(f"Total points: {len(matched_points)}")
+    print(f"Total campsites: {len(matched_camps)}")
+    print(f"Required nights: {total_nights}")
+
+    # Get indices of all campsites
+    campsite_indices = set(
+        range(len(matched_points) - len(matched_camps), len(matched_points))
+    )
+
     current_path = initial_path.copy()
     current_score = calculate_path_score(
         current_path,
@@ -565,24 +576,11 @@ def optimize_loop(
     points_in_path = set(current_path.points)
     available_points = list(all_points - points_in_path)
 
-    # Get indices of all campsites
-    campsite_indices = set(
-        range(len(matched_points) - len(matched_camps), len(matched_points))
-    )
-
     print(f"Starting optimization with {max_iterations} iterations")
     print(f"Initial path score: {current_score:.2f}")
 
     while temperature > MIN_TEMPERATURE and iteration < max_iterations:
         iteration += 1
-
-        # Log progress every 100 iterations
-        if iteration % 10 == 0:
-            print(f"\nIteration {iteration}:")
-            print(f"Temperature: {temperature:.4f}")
-            print(f"Current score: {current_score:.2f}")
-            print(f"Best score: {best_score:.2f}")
-            print(f"Iterations since last improvement: {iteration - last_improvement}")
 
         neighbor = current_path.copy()
         available_points = list(all_points - set(neighbor.points))
@@ -597,7 +595,11 @@ def optimize_loop(
             possible_moves.append("insert")
         if len(current_path.points) > 4:
             possible_moves.append("delete")
-        if len(current_path.camp_indices) == total_nights:
+
+        # Add camping-related moves
+        if len(current_path.camp_indices) < total_nights:
+            possible_moves.append("add_camp")  # New move type
+        elif len(current_path.camp_indices) == total_nights:
             possible_moves.append("shuffle_camps")
 
         if not possible_moves:
@@ -652,9 +654,42 @@ def optimize_loop(
                     for idx in neighbor.camp_indices
                 ]
 
+        elif move_type == "add_camp":
+            # Find available points that are campsites
+            available_campsites = [
+                p
+                for p in available_points
+                if p in campsite_indices  # Must be a campsite
+            ]
+
+            if available_campsites:
+                # Insert a random available campsite at a random position
+                campsite_to_insert = random.choice(available_campsites)
+                insert_pos = random.randint(1, len(neighbor.points) - 1)
+
+                # Insert the campsite into the path
+                neighbor.points.insert(insert_pos, campsite_to_insert)
+
+                # Add the new position to camp indices
+                neighbor.camp_indices.append(insert_pos)
+                neighbor.camp_indices.sort()  # Keep indices in order
+
+                # Update camp indices after insertion for existing camps
+                neighbor.camp_indices = [
+                    idx + 1 if idx >= insert_pos else idx
+                    for idx in neighbor.camp_indices[
+                        :-1
+                    ]  # Don't adjust the one we just added
+                ] + [insert_pos]
+
         elif move_type == "shuffle_camps":
             camp_idx = random.randint(0, len(neighbor.camp_indices) - 1)
-            current_camp_pos = neighbor.camp_indices[camp_idx]
+
+            # Debug logging
+            print(f"\nAttempting to shuffle camp {camp_idx}")
+            print(f"Current camp indices: {neighbor.camp_indices}")
+            print(f"Total campsites available: {len(campsite_indices)}")
+            print(f"Campsite indices: {sorted(list(campsite_indices))}")
 
             # Find valid positions between previous and next camp
             prev_camp = neighbor.camp_indices[camp_idx - 1] if camp_idx > 0 else 0
@@ -664,6 +699,8 @@ def optimize_loop(
                 else len(neighbor.points) - 1
             )
 
+            print(f"Search range: {prev_camp} to {next_camp}")
+
             # Get all possible positions between prev_camp and next_camp that are campsites
             possible_positions = [
                 i
@@ -672,9 +709,19 @@ def optimize_loop(
                 and i not in neighbor.camp_indices  # Don't reuse camping spots
             ]
 
+            print(
+                f"Points in range: {[neighbor.points[i] for i in range(prev_camp + 1, next_camp)]}"
+            )
+            print(
+                f"Found {len(possible_positions)} possible camping positions: {possible_positions}"
+            )
+
             if possible_positions:
                 new_camp_pos = random.choice(possible_positions)
                 neighbor.camp_indices[camp_idx] = new_camp_pos
+                print(f"Selected new camp position: {new_camp_pos}")
+            else:
+                print("No valid camping positions found")
 
         # Calculate new score
         neighbor_score = calculate_path_score(
@@ -727,7 +774,6 @@ def optimize_loop(
     print("Final path statistics:")
     print(f"- Points in path: {len(best_path.points)}")
     print(f"- Unique points: {len(set(best_path.points))}")
-    print(f"- Total distance: {best_score:.2f} miles")
     print(f"- Camping spots: {len(best_path.camp_indices)}")
 
     # Return as a list with one tuple of (path, score)
