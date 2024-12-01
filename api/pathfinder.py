@@ -409,9 +409,8 @@ def generate_initial_loop(
     print(f"- Total distance: {current_distance:.2f} miles")
     print(f"- Average distance per day: {current_distance/total_nights:.2f} miles")
 
-    # Evenly space out camp indices
-    points_per_day = len(path) // (total_nights + 1)
-    camp_indices = [i * points_per_day for i in range(1, total_nights + 1)]
+    # Assign camping spots by indentifying points that are campsites in the path and adding them to camp_indices for the number of nights
+    camp_indices = [i for i, point in enumerate(path) if point in matched_camps]
 
     return LoopPath(path, camp_indices)
 
@@ -455,11 +454,25 @@ def calculate_path_score(
     matched_points,
     G,
     total_nights,
+    matched_camps,
     max_day_distance=MAX_DISTANCE_PER_DAY,
 ):
     """Calculate score with better balanced penalties"""
     points = loop_path.points
     camp_indices = loop_path.camp_indices
+
+    # Penalize missing camping spots instead of rejecting
+    camping_penalty = abs(len(camp_indices) - total_nights) * 1000
+
+    # Get indices of all campsites
+    campsite_indices = set(
+        range(len(matched_points) - len(matched_camps), len(matched_points))
+    )
+
+    # Penalize non-campsite camping spots
+    for camp_idx in camp_indices:
+        if points[camp_idx] not in campsite_indices:
+            camping_penalty += 500
 
     # Basic metrics
     unique_points = len(set(points))
@@ -469,50 +482,32 @@ def calculate_path_score(
     daily_distances = []
     distance_penalties = 0
 
-    # Check if we have enough camping spots
-    if len(camp_indices) < total_nights:
-        return float("-inf")
-
     for segment in day_segments:
         if len(segment) < 2:
             continue
 
-        # Distance is already in miles from the distance matrix
+        # Calculate segment distance using distance matrix
         day_distance = sum(
             dist_matrix[segment[i]][segment[i + 1]] for i in range(len(segment) - 1)
         )
         daily_distances.append(day_distance)
 
-        # Much harsher penalty for exceeding max distance
+        # Harsh penalty for exceeding max distance
         if day_distance > max_day_distance:
             excess = day_distance - max_day_distance
-            # Exponential penalty for large distances
             distance_penalties += (excess / max_day_distance) ** 2 * 1000
-
-        elif day_distance < max_day_distance * 0.1:  # Penalize very short days
-            shortfall = max_day_distance * 0.1 - day_distance
+        elif day_distance < max_day_distance * 0.2:  # Penalize very short days
+            shortfall = max_day_distance * 0.2 - day_distance
             distance_penalties += shortfall * 10
 
-    # Calculate path overlap penalty with lower weight
-    edge_usage = {}
+    # Calculate path overlap penalty using distance matrix
+    # Count how many times each segment is used
+    segment_usage = {}
     for i in range(len(points) - 1):
-        point1 = matched_points[points[i]]
-        point2 = matched_points[points[i + 1]]
+        segment = tuple(sorted([points[i], points[i + 1]]))
+        segment_usage[segment] = segment_usage.get(segment, 0) + 1
 
-        try:
-            actual_path = rx.dijkstra_shortest_paths(
-                G, point1["node_idx"], weight_fn=lambda x: float(x)
-            )[point2["node_idx"]]
-
-            for j in range(len(actual_path) - 1):
-                edge = tuple(sorted([actual_path[j], actual_path[j + 1]]))
-                edge_usage[edge] = edge_usage.get(edge, 0) + 1
-
-        except Exception as e:
-            print(f"Error calculating path overlap: {str(e)}")
-            continue
-
-    overlap_penalty = sum(count - 1 for count in edge_usage.values())
+    overlap_penalty = sum(count - 1 for count in segment_usage.values())
 
     # Check for balanced daily distances
     if len(daily_distances) > 1:
@@ -520,18 +515,18 @@ def calculate_path_score(
         balance_penalty = sum(abs(d - avg_distance) for d in daily_distances)
     else:
         balance_penalty = 0
-
-    # Adjusted scoring weights
-    point_weight = 5.0  # Weight for unique points
-    distance_penalty_weight = 1.0  # Weight for distance penalties
-    overlap_weight = 3  # Weight for path overlap
-    balance_weight = 0.5  # Weight for balanced days
+    # Scoring weights
+    point_weight = 2.0
+    distance_penalty_weight = 1.0
+    overlap_weight = 8.0
+    balance_weight = 2.0
 
     score = (
         point_weight * unique_points
         - distance_penalty_weight * distance_penalties
         - overlap_weight * overlap_penalty
         - balance_weight * balance_penalty
+        - camping_penalty  # Add camping penalty
     )
 
     return score
@@ -546,17 +541,17 @@ def optimize_loop(
     matched_camps,
     max_iterations=1000,
     max_day_distance=MAX_DISTANCE_PER_DAY,
-    websocket_manager=None,
 ):
     """Optimize loop and track best paths"""
-
-    async def send_log(message: str):
-        if websocket_manager:
-            await websocket_manager.broadcast(message)
-
     current_path = initial_path.copy()
     current_score = calculate_path_score(
-        current_path, dist_matrix, matched_points, G, total_nights, max_day_distance
+        current_path,
+        dist_matrix,
+        matched_points,
+        G,
+        total_nights,
+        matched_camps,
+        max_day_distance,
     )
     best_score = current_score
     best_path = current_path.copy()
@@ -582,7 +577,7 @@ def optimize_loop(
         iteration += 1
 
         # Log progress every 100 iterations
-        if iteration % 100 == 0:
+        if iteration % 10 == 0:
             print(f"\nIteration {iteration}:")
             print(f"Temperature: {temperature:.4f}")
             print(f"Current score: {current_score:.2f}")
@@ -602,6 +597,8 @@ def optimize_loop(
             possible_moves.append("insert")
         if len(current_path.points) > 4:
             possible_moves.append("delete")
+        if len(current_path.camp_indices) == total_nights:
+            possible_moves.append("shuffle_camps")
 
         if not possible_moves:
             print("No valid moves available")
@@ -610,33 +607,86 @@ def optimize_loop(
         move_type = random.choice(possible_moves)
 
         if move_type == "swap":
-            # Swap two random points that aren't the start/end
+            # Can swap any points, just update camp indices if needed
             if len(neighbor.points) > 3:
                 i = random.randint(1, len(neighbor.points) - 2)
                 j = random.randint(1, len(neighbor.points) - 2)
+
+                # Update camp indices if we're swapping camping spots
+                neighbor.camp_indices = [
+                    j if idx == i else i if idx == j else idx
+                    for idx in neighbor.camp_indices
+                ]
+
+                # Perform the swap
                 neighbor.points[i], neighbor.points[j] = (
                     neighbor.points[j],
                     neighbor.points[i],
                 )
 
         elif move_type == "insert":
-            # Insert a random available point at a random position
+            # Insert remains mostly the same, just update camp indices
             if available_points:
                 point_to_insert = random.choice(available_points)
                 insert_pos = random.randint(1, len(neighbor.points) - 1)
                 neighbor.points.insert(insert_pos, point_to_insert)
+                # Update camp indices after insertion
+                neighbor.camp_indices = [
+                    idx + 1 if idx >= insert_pos else idx
+                    for idx in neighbor.camp_indices
+                ]
 
         elif move_type == "delete":
-            # Delete a random point that isn't start/end
-            deletable_positions = list(range(1, len(neighbor.points) - 1))
+            # Only delete points that aren't camping spots
+            deletable_positions = [
+                i
+                for i in range(1, len(neighbor.points) - 1)
+                if i not in neighbor.camp_indices
+            ]
             if deletable_positions:
                 delete_pos = random.choice(deletable_positions)
                 neighbor.points.pop(delete_pos)
+                # Update camp indices after deletion
+                neighbor.camp_indices = [
+                    idx - 1 if idx > delete_pos else idx
+                    for idx in neighbor.camp_indices
+                ]
+
+        elif move_type == "shuffle_camps":
+            camp_idx = random.randint(0, len(neighbor.camp_indices) - 1)
+            current_camp_pos = neighbor.camp_indices[camp_idx]
+
+            # Find valid positions between previous and next camp
+            prev_camp = neighbor.camp_indices[camp_idx - 1] if camp_idx > 0 else 0
+            next_camp = (
+                neighbor.camp_indices[camp_idx + 1]
+                if camp_idx < len(neighbor.camp_indices) - 1
+                else len(neighbor.points) - 1
+            )
+
+            # Get all possible positions between prev_camp and next_camp that are campsites
+            possible_positions = [
+                i
+                for i in range(prev_camp + 1, next_camp)
+                if neighbor.points[i] in campsite_indices  # Only use actual campsites
+                and i not in neighbor.camp_indices  # Don't reuse camping spots
+            ]
+
+            if possible_positions:
+                new_camp_pos = random.choice(possible_positions)
+                neighbor.camp_indices[camp_idx] = new_camp_pos
 
         # Calculate new score
         neighbor_score = calculate_path_score(
-            neighbor, dist_matrix, matched_points, G, total_nights, max_day_distance
+            neighbor,
+            dist_matrix,
+            matched_points,
+            G,
+            total_nights,
+            matched_camps,
+            max_day_distance,
         )
+
         try:
             # Accept or reject new solution with modified acceptance criteria
             delta = neighbor_score - current_score
